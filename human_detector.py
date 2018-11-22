@@ -48,6 +48,7 @@ def overlay(src, dst, box):
 
 def detector_loop(capture, classifier, face_recon, types, type_imgs):
     recon_shape = face_recon.getMean().shape
+    cv2.namedWindow('capture', 0)
     while True:
         # Capture
         frame = capture_image(capture)
@@ -57,10 +58,13 @@ def detector_loop(capture, classifier, face_recon, types, type_imgs):
         # Detect
         faces = classifier.detectMultiScale(frame_gray, 1.1, 10, flags=cv2.CASCADE_SCALE_IMAGE)
         for face in faces:
-            cv2.rectangle(frame, (face[0], face[1]), (face[0] + face[2], face[1] + face[3]), (0., 0., 255.), 5)
             face_img_gray = frame_gray[face[1]:face[1] + face[3], face[0]:face[0] + face[2]]
             face_resized = cv2.resize(face_img_gray, recon_shape)
-            label, _ = face_recon.predict(face_resized)
+            label, accuracy = face_recon.predict(face_resized)
+
+            cv2.rectangle(frame, (face[0], face[1]), (face[0] + face[2], face[1] + face[3]), (0., 0., 255.), 5)
+            cv2.addText(frame, f'{accuracy:.2f}', (face[0], face[1]-12), 'monospace', color=(0., 0., 255.))
+
             matching = types['type'][np.where(label <= types['prob'])[0][0]]
             matching_img = types_imgs[matching]
             overlay(matching_img, frame, face)
@@ -87,8 +91,8 @@ parser.add_argument(
     help='Cascade XML'
 )
 parser.add_argument(
-    '--fisher', type=str, default=os.path.join(os.path.dirname(os.path.realpath(__file__)), 'yale.yml'),
-    help='Pre-trained Fisher model'
+    '--model', type=str, default=os.path.join(os.path.dirname(os.path.realpath(__file__)), 'yale.yml'),
+    help='Pre-trained face model'
 )
 parser.add_argument(
     '--types', type=str, default=os.path.join(os.path.dirname(os.path.realpath(__file__)), 'Types')
@@ -115,9 +119,9 @@ if not capture.isOpened():
 logger.info(f'Loading cascade classifier {args.cascade}')
 classifier = cv2.CascadeClassifier(args.cascade)
 
-logger.info(f'Loading Fisher model {args.fisher}')
+logger.info(f'Loading face model {args.model}')
 face_recon = cv2.face.FisherFaceRecognizer_create(80)
-face_recon.read(args.fisher)
+face_recon.read(args.model)
 
 logger.info(f'Loading type archive {args.types}')
 types, types_imgs = load_types(args.types, args.human)

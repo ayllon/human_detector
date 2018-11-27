@@ -1,10 +1,17 @@
+#!/usr/bin/env python3
 import logging
 import os
 from argparse import ArgumentParser
 
 import coloredlogs
 import cv2
+import face_recognition as fr
 import numpy as np
+import matplotlib.pyplot as plt
+import dlib.cuda as cuda
+
+if cuda.get_num_devices() > 0:
+    LOCATION_MODEL= 'cnn'
 
 logger = logging.getLogger()
 
@@ -34,8 +41,11 @@ def capture_image(capture):
 
 
 def overlay(src, dst, box):
-    dst_bg = dst[box[1]:box[1] + box[3], box[0]:box[0] + box[2]]
-    src_resized = cv2.resize(src, dst_bg.shape[0:2])
+    top, right, bottom, left = box
+    width = right - left
+    height = bottom - top
+    dst_bg = dst[top:bottom, left:right]
+    src_resized = cv2.resize(src, (width, height))
 
     alpha = (src_resized[:, :, 3] / 255.) * .6
     beta = 1 - alpha
@@ -43,34 +53,76 @@ def overlay(src, dst, box):
     overlay = alpha[:, :, np.newaxis] * src_resized[:, :, 0:3]
     original = beta[:, :, np.newaxis] * dst_bg
 
-    dst[box[1]:box[1] + box[3], box[0]:box[0] + box[2]] = cv2.add(overlay, original)
+    dst[top:bottom, left:right] = cv2.add(overlay, original)
 
 
-def detector_loop(capture, classifier, face_recon, types, type_imgs):
-    recon_shape = face_recon.getMean().shape
+def get_faces(frame, ratio):
+    faces = []
+
+    detection_frame = cv2.resize(frame, (0, 0), fx=ratio, fy=ratio)
+    locations = fr.face_locations(detection_frame, model=LOCATION_MODEL)
+    if locations:
+        encodings = fr.face_encodings(detection_frame, locations)
+    else:
+        encodings = []
+
+    for location, encoding in zip(locations, encodings):
+        top, right, bottom, left = location
+        top = int(top / ratio)
+        right = int(right / ratio)
+        bottom = int(bottom / ratio)
+        left = int(left / ratio)
+        face_img = frame[top:bottom, left:right]
+        faces.append(((top, right, bottom, left), face_img, encoding))
+
+    return faces
+
+
+def find_known_face(known_faces, encoding):
+    DIST = 0.6
+    if known_faces.size == 0:
+        return 0, np.array([encoding])
+
+    distance = np.linalg.norm(known_faces - encoding, axis=1)
+    matching = np.nonzero(distance < DIST)[0]
+    if matching.size == 0:
+        known_faces = np.vstack([known_faces, encoding])
+        return len(known_faces), known_faces
+    return matching[0], known_faces
+
+
+def detector_loop(capture, types, type_imgs):
+    NSKIP = 2
+    known_faces = np.empty((0,128))
+    cmap = plt.get_cmap('Dark2')
+
     cv2.namedWindow('capture', 0)
+
+    i = 0
     while True:
         # Capture
         frame = capture_image(capture)
-        frame = cv2.resize(frame, (640, 480))
-        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        frame = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
+        ratio = 320. / frame.shape[0]
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        display_frame = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)
+
         # Detect
-        faces = classifier.detectMultiScale(frame_gray, 1.1, 10, flags=cv2.CASCADE_SCALE_IMAGE)
-        for face in faces:
-            face_img_gray = frame_gray[face[1]:face[1] + face[3], face[0]:face[0] + face[2]]
-            face_resized = cv2.resize(face_img_gray, recon_shape)
-            label, accuracy = face_recon.predict(face_resized)
+        if i % NSKIP == 0:
+            faces = get_faces(frame, ratio)
+            face_ids = []
+            for _, _, encoding in faces:
+                fi, known_faces = find_known_face(known_faces, encoding)
+                face_ids.append(fi)
 
-            cv2.rectangle(frame, (face[0], face[1]), (face[0] + face[2], face[1] + face[3]), (0., 0., 255.), 5)
-            cv2.addText(frame, f'{accuracy:.2f}', (face[0], face[1]-12), 'monospace', color=(0., 0., 255.))
-
-            matching = types['type'][np.where(label <= types['prob'])[0][0]]
-            matching_img = types_imgs[matching]
-            overlay(matching_img, frame, face)
+        for ((top, right, bottom, left), face_img, encoding), face_id in zip(faces, face_ids):
+            color = np.array(cmap(face_id % 8)) * 255
+            color = color[[2, 1, 0, 3]]  # Transform to OpenCV BGRA
+            color[3] = 0. # 0 = fully opaque in OpenCV
+            cv2.rectangle(display_frame, (left, top), (right, bottom), color, 5)
+            cv2.addText(display_frame, f'ID: {face_id}', (left, top - 12), 'monospace', color=color, weight=75)
 
         # Display
-        cv2.imshow('capture', frame)
+        cv2.imshow('capture', display_frame)
         # Events and refresh
         cv2.waitKey(10)
         if cv2.getWindowProperty('capture', cv2.WND_PROP_VISIBLE) < 1:
@@ -85,14 +137,6 @@ parser.add_argument(
 parser.add_argument(
     '-v', '--video', type=str,
     help='Capture from video'
-)
-parser.add_argument(
-    '--cascade', type=str, default='/usr/share/OpenCV/haarcascades/haarcascade_frontalface_default.xml',
-    help='Cascade XML'
-)
-parser.add_argument(
-    '--model', type=str, default=os.path.join(os.path.dirname(os.path.realpath(__file__)), 'yale.yml'),
-    help='Pre-trained face model'
 )
 parser.add_argument(
     '--types', type=str, default=os.path.join(os.path.dirname(os.path.realpath(__file__)), 'Types')
@@ -116,19 +160,11 @@ capture = cv2.VideoCapture(args.camera if args.camera is not None else args.vide
 if not capture.isOpened():
     capture.open(args.camera if args.camera else args.video)
 
-logger.info(f'Loading cascade classifier {args.cascade}')
-classifier = cv2.CascadeClassifier(args.cascade)
-
-logger.info(f'Loading face model {args.model}')
-face_recon = cv2.face.FisherFaceRecognizer_create(80)
-face_recon.read(args.model)
-
 logger.info(f'Loading type archive {args.types}')
 types, types_imgs = load_types(args.types, args.human)
-types['prob'] *= face_recon.getLabels().max()
 
 try:
-    detector_loop(capture, classifier, face_recon, types, types_imgs)
+    detector_loop(capture, types, types_imgs)
 finally:
     logger.info('Destroying windows')
     cv2.destroyAllWindows()

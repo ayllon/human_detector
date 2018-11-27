@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 import logging
 import os
+import random
 from argparse import ArgumentParser
 
 import coloredlogs
 import cv2
-import face_recognition as fr
 import numpy as np
 import matplotlib.pyplot as plt
-import dlib.cuda as cuda
+import dlib
 
-if cuda.get_num_devices() > 0:
-    LOCATION_MODEL = 'cnn'
+LOCATION_MODEL = 'hog'
+try:
+    import dlib.cuda as cuda
+
+    if cuda.get_num_devices() > 0 and dlib.DLIB_USE_CUDA:
+        LOCATION_MODEL = 'cnn'
+except ImportError:
+    pass
+
+import face_recognition as fr
+
 FACE_TOLERANCE = 0.6
 
 logger = logging.getLogger()
@@ -79,22 +88,35 @@ def get_faces(frame, ratio):
     return faces
 
 
-def find_known_face(known_faces, encoding):
-    if known_faces.size == 0:
-        return 0, np.array([encoding])
+class FaceDatabase(object):
+    def __init__(self, tolerance=FACE_TOLERANCE):
+        self.__known_faces = np.empty((0, 128))
+        self.__type_prob = []
+        self.__tolerance = tolerance
 
-    distance = np.linalg.norm(known_faces - encoding, axis=1)
-    matching = np.nonzero(distance < FACE_TOLERANCE)[0]
-    if matching.size == 0:
-        known_faces = np.vstack([known_faces, encoding])
-        return len(known_faces), known_faces
-    return matching[0], known_faces
+    def __insert_new(self, encoding):
+        idx = len(self.__type_prob)
+        prob = random.random()
+        self.__type_prob.append(prob)
+        self.__known_faces = np.vstack([self.__known_faces, encoding])
+        return idx, prob
+
+    def __call__(self, encoding):
+        if self.__known_faces.size == 0:
+            return self.__insert_new(encoding)
+
+        distance = np.linalg.norm(self.__known_faces - encoding, axis=1)
+        matching = np.nonzero(distance < self.__tolerance)[0]
+        if matching.size == 0:
+            return self.__insert_new(encoding)
+
+        return matching[0], self.__type_prob[matching[0]]
 
 
 def detector_loop(capture, types, type_imgs):
     NSKIP = 2
-    known_faces = np.empty((0, 128))
     cmap = plt.get_cmap('Dark2')
+    fdb = FaceDatabase()
 
     cv2.namedWindow('capture', 0)
 
@@ -111,15 +133,19 @@ def detector_loop(capture, types, type_imgs):
             faces = get_faces(frame, ratio)
             face_ids = []
             for _, _, encoding in faces:
-                fi, known_faces = find_known_face(known_faces, encoding)
-                face_ids.append(fi)
+                fi, fprob = fdb(encoding)
+                face_ids.append((fi, fprob))
 
-        for ((top, right, bottom, left), face_img, encoding), face_id in zip(faces, face_ids):
+        for ((top, right, bottom, left), face_img, encoding), (face_id, face_prob) in zip(faces, face_ids):
             color = np.array(cmap(face_id % 8)) * 255
             color = color[[2, 1, 0, 3]]  # Transform to OpenCV BGRA
             color[3] = 0.  # 0 = fully opaque in OpenCV
             cv2.rectangle(display_frame, (left, top), (right, bottom), color, 5)
-            cv2.addText(display_frame, f'ID: {face_id}', (left, top - 12), 'monospace', color=color, weight=75)
+            label = types['type'][np.where(face_prob <= types['prob'])[0][0]]
+            cv2.addText(
+                display_frame, f'ID: {face_id} {label} ({face_prob:.2f})', (left, top - 12), 'monospace', color=color,
+                weight=75
+            )
 
         # Display
         cv2.imshow('capture', display_frame)

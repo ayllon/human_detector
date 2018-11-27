@@ -21,8 +21,6 @@ except ImportError:
 
 import face_recognition as fr
 
-FACE_TOLERANCE = 0.6
-
 logger = logging.getLogger()
 
 
@@ -89,7 +87,7 @@ def get_faces(frame, ratio):
 
 
 class FaceDatabase(object):
-    def __init__(self, tolerance=FACE_TOLERANCE):
+    def __init__(self, tolerance):
         self.__known_faces = np.empty((0, 128))
         self.__type_prob = []
         self.__tolerance = tolerance
@@ -113,10 +111,23 @@ class FaceDatabase(object):
         return matching[0], self.__type_prob[matching[0]]
 
 
-def detector_loop(capture, types, type_imgs):
+def overlay(src, dst, box):
+    top, right, bottom, left = box
+    dst_bg = dst[top:bottom, left:right]
+    src_resized = cv2.resize(src, (dst_bg.shape[1], dst_bg.shape[0]))
+
+    alpha = (src_resized[:, :, 3] / 255.) * .6
+    beta = 1 - alpha
+
+    overlay = alpha[:, :, np.newaxis] * src_resized[:, :, 0:3]
+    original = beta[:, :, np.newaxis] * dst_bg
+
+    dst[top:bottom, left:right] = cv2.add(overlay, original)
+
+
+def detector_loop(capture, fdb, types, type_imgs):
     NSKIP = 2
     cmap = plt.get_cmap('Dark2')
-    fdb = FaceDatabase()
 
     cv2.namedWindow('capture', 0)
 
@@ -136,7 +147,8 @@ def detector_loop(capture, types, type_imgs):
                 fi, fprob = fdb(encoding)
                 face_ids.append((fi, fprob))
 
-        for ((top, right, bottom, left), face_img, encoding), (face_id, face_prob) in zip(faces, face_ids):
+        for (box, face_img, encoding), (face_id, face_prob) in zip(faces, face_ids):
+            top, right, bottom, left = box
             color = np.array(cmap(face_id % 8)) * 255
             color = color[[2, 1, 0, 3]]  # Transform to OpenCV BGRA
             color[3] = 0.  # 0 = fully opaque in OpenCV
@@ -146,6 +158,7 @@ def detector_loop(capture, types, type_imgs):
                 display_frame, f'ID: {face_id} {label} ({face_prob:.2f})', (left, top - 12), 'monospace', color=color,
                 weight=75
             )
+            overlay(types_imgs[label], display_frame, box)
 
         # Display
         cv2.imshow('capture', display_frame)
@@ -168,7 +181,10 @@ parser.add_argument(
     '--types', type=str, default=os.path.join(os.path.dirname(os.path.realpath(__file__)), 'Types')
 )
 parser.add_argument(
-    '--human', type=float, default=0.6, help='Human probability'
+    '--human', type=float, default=0.5, help='Human probability'
+)
+parser.add_argument(
+    '--face-tolerance', type=float, default=0.6, help='Face tolerance'
 )
 
 args = parser.parse_args()
@@ -191,8 +207,10 @@ if not capture.isOpened():
 logger.info(f'Loading type archive {args.types}')
 types, types_imgs = load_types(args.types, args.human)
 
+fdb = FaceDatabase(args.face_tolerance)
+
 try:
-    detector_loop(capture, types, types_imgs)
+    detector_loop(capture, fdb, types, types_imgs)
 finally:
     logger.info('Destroying windows')
     cv2.destroyAllWindows()

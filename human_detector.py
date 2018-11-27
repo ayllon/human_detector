@@ -11,7 +11,8 @@ import matplotlib.pyplot as plt
 import dlib.cuda as cuda
 
 if cuda.get_num_devices() > 0:
-    LOCATION_MODEL= 'cnn'
+    LOCATION_MODEL = 'cnn'
+FACE_TOLERANCE = 0.6
 
 logger = logging.getLogger()
 
@@ -79,12 +80,11 @@ def get_faces(frame, ratio):
 
 
 def find_known_face(known_faces, encoding):
-    DIST = 0.6
     if known_faces.size == 0:
         return 0, np.array([encoding])
 
     distance = np.linalg.norm(known_faces - encoding, axis=1)
-    matching = np.nonzero(distance < DIST)[0]
+    matching = np.nonzero(distance < FACE_TOLERANCE)[0]
     if matching.size == 0:
         known_faces = np.vstack([known_faces, encoding])
         return len(known_faces), known_faces
@@ -93,7 +93,7 @@ def find_known_face(known_faces, encoding):
 
 def detector_loop(capture, types, type_imgs):
     NSKIP = 2
-    known_faces = np.empty((0,128))
+    known_faces = np.empty((0, 128))
     cmap = plt.get_cmap('Dark2')
 
     cv2.namedWindow('capture', 0)
@@ -117,7 +117,7 @@ def detector_loop(capture, types, type_imgs):
         for ((top, right, bottom, left), face_img, encoding), face_id in zip(faces, face_ids):
             color = np.array(cmap(face_id % 8)) * 255
             color = color[[2, 1, 0, 3]]  # Transform to OpenCV BGRA
-            color[3] = 0. # 0 = fully opaque in OpenCV
+            color[3] = 0.  # 0 = fully opaque in OpenCV
             cv2.rectangle(display_frame, (left, top), (right, bottom), color, 5)
             cv2.addText(display_frame, f'ID: {face_id}', (left, top - 12), 'monospace', color=color, weight=75)
 
@@ -152,6 +152,8 @@ if args.camera is not None and args.video is not None:
     parser.error('Only one capture source supported')
 
 coloredlogs.install(logging.DEBUG)
+
+logger.info(f'Using model {LOCATION_MODEL}')
 
 logger.info('Initializing video capture')
 logger.debug(args.camera)
